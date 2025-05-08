@@ -1,235 +1,178 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <Firebase_ESP_Client.h>
+#include "DHT.h"
 
 // Firebase helpers
 #include <addons/TokenHelper.h>
 #include <addons/RTDBHelper.h>
 
-// Timestamp
-String getLocalTimeISO();
-String getLocalTimeUNIX();
+// Sensor DHT
+#define DHTPIN 21
+#define DHTTYPE DHT22
+DHT dht(DHTPIN, DHTTYPE);
+
+// LEDs
+#define LED_GREEN 14
+#define LED_RED 13
+#define RGB_RED 4
+#define RGB_GREEN 16
+#define RGB_BLUE 17
+
+// PWM para RGB
+#define PWM_FREQ 5000
+#define PWM_RESOLUTION 8
+#define CH_RED 0
+#define CH_GREEN 1
+#define CH_BLUE 2
 
 // NTP
-#define NTP_SERVER "YOUR_NTP_SERVER"
-#define NTP_GMT_OFFSET_SEC 0
-#define NTP_DAYLIGHT_OFFSET_SEC 0
+#define NTP_SERVER "pool.ntp.org"
+#define NTP_GMT_OFFSET_SEC 3600
+#define NTP_DAYLIGHT_OFFSET_SEC 3600
 
-// WiFi credentials
-#define WIFI_SSID "YOUR_SSID"
-#define WIFI_PASSWORD "YOUR_PASSWORD"
 
-// Firebase API key
-#define API_KEY "YOUR_API_KEY"
-
-// Firebase RTDB URL
-#define DATABASE_URL "YOUR_RTDB_URL"
-
-// Firebase objects
+// Firebase objetos
 FirebaseData fbdo;
 FirebaseAuth auth;
 FirebaseConfig config;
 
-// Global variables
-unsigned long sendDataPrevMillis = 0;
 bool signupOK = false;
+
+// Intervalos
+unsigned long prevSensorMillis = 0;
+unsigned long prevActuatorMillis = 0;
+const unsigned long SENSOR_INTERVAL = 60000;  // 60 segundos
+const unsigned long ACTUATOR_INTERVAL = 3000; // 3 segundos
+
+// Prototipos de tiempo
+String getLocalTimeISO();
+String getLocalTimeUNIX();
 
 void setup()
 {
-  // Initialize Serial
   Serial.begin(115200);
+  dht.begin();
 
-  // Initialize WiFi
+  pinMode(LED_GREEN, OUTPUT);
+  pinMode(LED_RED, OUTPUT);
+
+  // PWM RGB
+  ledcSetup(CH_RED, PWM_FREQ, PWM_RESOLUTION);
+  ledcSetup(CH_GREEN, PWM_FREQ, PWM_RESOLUTION);
+  ledcSetup(CH_BLUE, PWM_FREQ, PWM_RESOLUTION);
+  ledcAttachPin(RGB_RED, CH_RED);
+  ledcAttachPin(RGB_GREEN, CH_GREEN);
+  ledcAttachPin(RGB_BLUE, CH_BLUE);
+
+  // WiFi
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  Serial.print("Connecting to WiFi");
-  while (WiFi.status() != WL_CONNECTED)
-  {
+  Serial.print("Conectando a WiFi");
+  while (WiFi.status() != WL_CONNECTED) {
     Serial.print(".");
     delay(333);
   }
   Serial.println();
-  Serial.print("Connected with IP: ");
+  Serial.print("Conectado con IP: ");
   Serial.println(WiFi.localIP());
-  Serial.println();
 
-  // Initialize NTP
+  // NTP
   configTime(NTP_GMT_OFFSET_SEC, NTP_DAYLIGHT_OFFSET_SEC, NTP_SERVER);
 
-  // Configure Firebase
+  // Firebase
   config.api_key = API_KEY;
   config.database_url = DATABASE_URL;
-
-  // Sign up
-  if (Firebase.signUp(&config, &auth, "", ""))
-  {
-    Serial.println("Firebase signup ok!");
-    signupOK = true;
-  }
-  else
-  {
-    Serial.println("Firebase signup failed!");
-  }
-
-  // Assign callback function for token generation task
   config.token_status_callback = tokenStatusCallback;
 
-  // Initialize Firebase
+  if (Firebase.signUp(&config, &auth, "", "")) {
+    Serial.println("Firebase signup ok!");
+    signupOK = true;
+  } else {
+    Serial.printf("Firebase signup failed: %s\n", config.signer.signupError.message.c_str());
+  }
+
   Firebase.begin(&config, &auth);
   Firebase.reconnectWiFi(true);
 }
 
-void loop ()
+void loop()
 {
-  static int intValue = 0;
-  float floatValue = 0.0;
-  static bool boolValue = true;
+  unsigned long currentMillis = millis();
 
-  if (Firebase.ready() && signupOK && (millis() - sendDataPrevMillis > 30000 || sendDataPrevMillis == 0))
-  {
-    // Firebase is ready, we are signup and 10 seconds has passed
-    // Save current time
-    sendDataPrevMillis = millis();
+  // LECTURA DE ACTUADORES (cada 3 segundos)
+  if (Firebase.ready() && signupOK && (currentMillis - prevActuatorMillis >= ACTUATOR_INTERVAL)) {
+    prevActuatorMillis = currentMillis;
 
-    // Write sample int
-    Serial.print("INT WRITE ");
-    intValue++;
-    if (Firebase.RTDB.setInt(&fbdo, "test/int", intValue))
-    {
-      Serial.println("OK");
-      Serial.println("  PATH: " + fbdo.dataPath());
-      Serial.println("  TYPE: " + fbdo.dataType());
-      Serial.print("  VALUE: ");
-      Serial.println(fbdo.intData());
-    }
-    else
-    {
-      Serial.println("FAILED");
-      Serial.println("  REASON: " + fbdo.errorReason());
+    // LED VERDE
+    bool ledStateG = false;
+    if (Firebase.RTDB.getBool(&fbdo, "actuador/led_g", &ledStateG)) {
+      digitalWrite(LED_GREEN, ledStateG ? HIGH : LOW);
+      Serial.print("LED VERDE: ");
+      Serial.println(ledStateG ? "ON" : "OFF");
     }
 
-    // Write sample float
-    floatValue = 0.01 + random (0,100);
-    Serial.print("FLOAT WRITE ");
-    if (Firebase.RTDB.setFloat(&fbdo, "test/float", floatValue))
-    {
-      Serial.println("OK");
-      Serial.println("  PATH: " + fbdo.dataPath());
-      Serial.println("  TYPE: " + fbdo.dataType());
-      Serial.print("  VALUE: ");
-      Serial.println(fbdo.floatData());
-    }
-    else
-    {
-      Serial.println("FAILED");
-      Serial.println("  REASON: " + fbdo.errorReason());
+    // LED ROJO
+    bool ledStateR = false;
+    if (Firebase.RTDB.getBool(&fbdo, "actuador/led_r", &ledStateR)) {
+      digitalWrite(LED_RED, ledStateR ? HIGH : LOW);
+      Serial.print("LED ROJO: ");
+      Serial.println(ledStateR ? "ON" : "OFF");
     }
 
-    // Write sample boolean
-    boolValue = !boolValue;
-    Serial.print("BOOLEAN WRITE ");
-    if (Firebase.RTDB.setBool(&fbdo, "test/boolean", boolValue))
-    {
-      Serial.println("OK");
-      Serial.println("  PATH: " + fbdo.dataPath());
-      Serial.println("  TYPE: " + fbdo.dataType());
-      Serial.print("  VALUE: ");
-      Serial.println(fbdo.boolData());
+    // RGB LEDs
+    int r = 0, g = 0, b = 0;
+    if (Firebase.RTDB.getInt(&fbdo, "actuador/rgb/red", &r) &&
+        Firebase.RTDB.getInt(&fbdo, "actuador/rgb/green", &g) &&
+        Firebase.RTDB.getInt(&fbdo, "actuador/rgb/blue", &b)) {
+      ledcWrite(CH_RED, r);
+      ledcWrite(CH_GREEN, g);
+      ledcWrite(CH_BLUE, b);
+      Serial.printf("RGB -> R:%d G:%d B:%d\n", r, g, b);
     }
-    else
-    {
-      Serial.println("FAILED");
-      Serial.println("  REASON: " + fbdo.errorReason());
+  }
+
+  // LECTURA DE SENSOR (cada 60 segundos)
+  if (Firebase.ready() && signupOK && (currentMillis - prevSensorMillis >= SENSOR_INTERVAL)) {
+    prevSensorMillis = currentMillis;
+
+    float humidity = dht.readHumidity();
+    float temperature = dht.readTemperature();
+
+    if (isnan(humidity) || isnan(temperature)) {
+      Serial.println("Error leyendo del sensor DHT!");
+      return;
     }
 
-    // Write sample string
-    Serial.print("STRING WRITE ");
-    if (Firebase.RTDB.setString(&fbdo, "test/string", "KAIXO!"))
-    {
-      Serial.println("OK");
-      Serial.println("  PATH: " + fbdo.dataPath());
-      Serial.println("  TYPE: " + fbdo.dataType());
-      Serial.print("  VALUE: ");
-      Serial.println(fbdo.stringData());
-    }
-    else
-    {
-      Serial.println("FAILED");
-      Serial.println("  REASON: " + fbdo.errorReason());
-    }
-
-    // Read sample int
-    int intRead = 0;
-    Serial.print("read/int: ");
-    if (Firebase.RTDB.getInt(&fbdo, "read/int", &intRead))
-    {
-      Serial.println(intRead);
-    }
-    else
-    {
-      Serial.println("FAILED");
-      Serial.println("  REASON: " + fbdo.errorReason());
-    }
-
-    // Read sample float
-    float floatRead = 0.0;
-    Serial.print("read/float: ");
-    if (Firebase.RTDB.getFloat(&fbdo, "read/float", &floatRead))
-    {
-      Serial.println(floatRead);
-    }
-    else
-    {
-      Serial.println("FAILED");
-      Serial.println("  REASON: " + fbdo.errorReason());
-    }
-
-    // Read sample boolean
-    bool boolRead = false;
-    Serial.print("read/boolean: ");
-    if (Firebase.RTDB.getBool(&fbdo, "read/boolean", &boolRead))
-    {
-      Serial.println(boolRead);
-    }
-    else
-    {
-      Serial.println("FAILED");
-      Serial.println("  REASON: " + fbdo.errorReason());
-    }
-
-    // Read sample string
-    String stringRead = "";
-    Serial.print("read/string: ");
-    if (Firebase.RTDB.getString(&fbdo, "read/string", &stringRead))
-    {
-      Serial.println(stringRead);
-    }
-    else
-    {
-      Serial.println("FAILED");
-      Serial.println("  REASON: " + fbdo.errorReason());
-    }
-
-    // Print time
     String timestamp_unix = getLocalTimeUNIX();
-    Serial.println("UNIX: " + timestamp_unix);
-
     String timestamp_iso = getLocalTimeISO();
-    Serial.println("ISO: " + timestamp_iso);
+    String path = "sensor/" + timestamp_unix;
+
+    Firebase.RTDB.setString(&fbdo, path + "/timestamp", timestamp_iso);
+    Firebase.RTDB.setFloat(&fbdo, path + "/temperatura", temperature);
+    Firebase.RTDB.setFloat(&fbdo, path + "/humedad", humidity);
+
+    String comfort = "confortable";
+    if (humidity > 60 && temperature > 30) {
+      comfort = "incómodo";
+    }
+    Firebase.RTDB.setString(&fbdo, path + "/confort", comfort);
+
+    Serial.println("Datos enviados:");
+    Serial.println("  Temperatura: " + String(temperature));
+    Serial.println("  Humedad: " + String(humidity));
+    Serial.println("  Confort: " + comfort);
+    Serial.println("  Timestamp (UNIX): " + timestamp_unix);
+    Serial.println("  Timestamp (ISO): " + timestamp_iso);
   }
 }
 
 String getLocalTimeISO()
 {
   struct tm timeinfo;
-  char buffer[20];
-
-  // Get local time
-  if(!getLocalTime(&timeinfo))
-  {
+  char buffer[25];
+  if (!getLocalTime(&timeinfo)) {
     return "NTP Error!";
   }
-
-  // Obtain ISO 8601 timestamp
   strftime(buffer, sizeof(buffer), "%Y-%m-%dT%H:%M:%S", &timeinfo);
   return String(buffer);
 }
@@ -237,13 +180,9 @@ String getLocalTimeISO()
 String getLocalTimeUNIX()
 {
   struct tm timeinfo;
-
-  // Get local time
-  if(!getLocalTime(&timeinfo))
-  {
+  if (!getLocalTime(&timeinfo)) {
     return "NTP Error!";
   }
-
-  // Obtain UNIX timestamp
   return String(mktime(&timeinfo));
 }
+
